@@ -1,12 +1,437 @@
-<html>
+<!DOCTYPE html>
+<html lang="ru">
   <head>
-    <title>Lively dots</title>
     <meta charset="UTF-8" />
+    <title>Lively dots</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top, #1c2a3a, #050608 70%);
+        color: #f5f6f8;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        min-height: 100vh;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      h1 {
+        margin: 0;
+        font-size: 28px;
+      }
+      canvas {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        background: rgba(5, 10, 18, 0.85);
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+      }
+      .stats {
+        display: flex;
+        gap: 18px;
+        font-size: 14px;
+      }
+      a {
+        color: #4fb4ff;
+      }
+    </style>
   </head>
-
   <body>
-    <div id="app"></div>
-    <script src="src/index.ts"></script>
-    <a href="//github.com/alpatovdanila/lively-dots">alpatovdanila/lively-dots</a>
+    <h1>Живые точки</h1>
+    <div class="stats" id="stats"></div>
+    <canvas id="world" width="600" height="600"></canvas>
+    <p>
+      Экосистема с генетическим алгоритмом без сторонних библиотек.
+      <a href="https://github.com/alpatovdanila/lively-dots" target="_blank">Исходный проект</a>
+    </p>
+    <script>
+      const WIDTH = 600;
+      const HEIGHT = 600;
+      const FOOD_RESPAWN_DELAY = [800, 2000];
+
+      const randRange = (min, max) => Math.random() * (max - min) + min;
+      const randomBetween = (from, to) => randRange(from, to);
+      const pickRandom = array => array[Math.floor(Math.random() * array.length)];
+      const distance = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
+      const angleBetween = (ax, ay, bx, by) => Math.atan2(by - ay, bx - ax);
+      const testChance = chance => Math.random() < chance;
+
+      class Gene {
+        constructor({ name, value, range = null, mutationStep = null }) {
+          this.name = name;
+          this.value = value;
+          this.range = range;
+          this.mutationStep = mutationStep;
+        }
+
+        mutate() {
+          let newValue = this.value;
+          if (this.range && this.mutationStep) {
+            const [min, max] = this.range;
+            newValue += this.mutationStep * pickRandom([-1, 1]);
+            if (newValue < min) newValue = min;
+            if (newValue > max) newValue = max;
+          }
+          return new Gene({
+            name: this.name,
+            value: newValue,
+            range: this.range,
+            mutationStep: this.mutationStep
+          });
+        }
+
+        fork() {
+          return new Gene({
+            name: this.name,
+            value: this.value,
+            range: this.range,
+            mutationStep: this.mutationStep
+          });
+        }
+      }
+
+      class Chromosome {
+        constructor(genes, prev = null) {
+          this.genes = genes;
+          this.prev = prev;
+        }
+
+        static create(definitions) {
+          return new Chromosome(definitions.map(def => new Gene(def)));
+        }
+
+        mutate() {
+          const genes = this.genes.map(gene => gene.fork());
+          const target = pickRandom(genes);
+          const mutated = genes.map(gene => (gene === target ? gene.mutate() : gene));
+          return new Chromosome(mutated, this);
+        }
+
+        fork() {
+          return new Chromosome(this.genes.map(gene => gene.fork()), this);
+        }
+
+        get(name) {
+          return this.genes.find(gene => gene.name === name);
+        }
+
+        get generation() {
+          return this.prev ? this.prev.generation + 1 : 1;
+        }
+
+        toString() {
+          return this.genes.map(g => g.value).join("-");
+        }
+      }
+
+      class Actor {
+        constructor(world) {
+          this.world = world;
+          this.dead = false;
+        }
+
+        update() {}
+        draw() {}
+        die() {
+          this.dead = true;
+        }
+      }
+
+      class Food extends Actor {
+        constructor(world) {
+          super(world);
+          this.radius = 2;
+          this.respawnDelay = randRange(...FOOD_RESPAWN_DELAY);
+          this.randomizePosition();
+        }
+
+        randomizePosition() {
+          this.x = randomBetween(40, WIDTH - 40);
+          this.y = randomBetween(40, HEIGHT - 40);
+        }
+
+        draw(ctx) {
+          ctx.fillStyle = "#4fffd8";
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        onEaten() {
+          this.die();
+          setTimeout(() => {
+            if (this.world.running) {
+              this.world.food.push(new Food(this.world));
+            }
+          }, this.respawnDelay);
+        }
+      }
+
+      let CELL_ID = 0;
+      class Cell extends Actor {
+        constructor(world, x, y, chromosome) {
+          super(world);
+          this.id = ++CELL_ID;
+          this.chromosome = chromosome;
+          this.size = chromosome.get("size").value;
+          this.impulse = chromosome.get("impulse").value;
+          this.maxEnergy = 200;
+          this.energy = this.maxEnergy;
+          this.vx = 0;
+          this.vy = 0;
+          this.x = x;
+          this.y = y;
+          this.colorBase = randRange(180, 260);
+        }
+
+        get speedLimit() {
+          return Math.max(40, this.impulse * 0.6);
+        }
+
+        getReproductionChance() {
+          return 0.25 * (this.energy / this.maxEnergy);
+        }
+
+        applyForce(angle, strength) {
+          this.vx += Math.cos(angle) * strength;
+          this.vy += Math.sin(angle) * strength;
+        }
+
+        attractToFood(dt) {
+          const closest = this.world.findClosestFood(this);
+          if (!closest) return;
+          const angle = angleBetween(this.x, this.y, closest.x, closest.y);
+          const thrust = this.impulse * 15 * dt;
+          this.applyForce(angle, thrust);
+        }
+
+        integrate(dt) {
+          const speed = Math.hypot(this.vx, this.vy);
+          if (speed > this.speedLimit) {
+            const factor = this.speedLimit / speed;
+            this.vx *= factor;
+            this.vy *= factor;
+          }
+
+          this.x += this.vx * dt;
+          this.y += this.vy * dt;
+
+          const bounce = (pos, vel, min, max) => {
+            if (pos < min) {
+              pos = min;
+              vel = Math.abs(vel);
+            } else if (pos > max) {
+              pos = max;
+              vel = -Math.abs(vel);
+            }
+            return [pos, vel];
+          };
+
+          [this.x, this.vx] = bounce(this.x, this.vx, this.size, WIDTH - this.size);
+          [this.y, this.vy] = bounce(this.y, this.vy, this.size, HEIGHT - this.size);
+        }
+
+        eat(food) {
+          food.onEaten();
+          this.energy = Math.min(this.maxEnergy, this.energy + 50);
+        }
+
+        eatCell(other) {
+          if (other.dead) return;
+          other.die();
+          this.energy = Math.min(this.maxEnergy, this.energy + other.energy);
+        }
+
+        reproduce() {
+          const children = Array.from({ length: 2 }, () => {
+            const genome = testChance(0.25)
+              ? this.chromosome.mutate()
+              : this.chromosome.fork();
+            return new Cell(
+              this.world,
+              this.x + randRange(-10, 10),
+              this.y + randRange(-10, 10),
+              genome
+            );
+          });
+          this.world.pendingCells.push(...children);
+          this.die();
+        }
+
+        update(dt) {
+          if (this.dead) return;
+          this.attractToFood(dt);
+          this.integrate(dt);
+
+          this.energy -= this.impulse * dt * 8;
+          if (this.energy > this.maxEnergy) this.energy = this.maxEnergy;
+
+          if (this.energy <= 0) {
+            this.die();
+            return;
+          }
+
+          const reproductionChance = this.getReproductionChance() * dt;
+          if (testChance(reproductionChance * 0.6)) {
+            this.reproduce();
+          }
+        }
+
+        draw(ctx) {
+          const energyFactor = Math.max(this.energy / this.maxEnergy, 0.1);
+          ctx.fillStyle = `hsl(${this.colorBase}, 70%, ${30 + 40 * energyFactor}%)`;
+          ctx.globalAlpha = 0.3 + 0.7 * energyFactor;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+
+          ctx.strokeStyle = "rgba(255,255,255,0.15)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      class Simulation {
+        constructor(canvas) {
+          this.canvas = canvas;
+          this.ctx = canvas.getContext("2d");
+          this.cells = [];
+          this.food = [];
+          this.pendingCells = [];
+          this.running = false;
+          this.lastTime = performance.now();
+
+          const chromosome = Chromosome.create([
+            { name: "impulse", value: 50, range: [10, 100], mutationStep: 5 },
+            { name: "size", value: 6, range: [3, 20], mutationStep: 1 }
+          ]);
+
+          for (let i = 0; i < 80; i++) {
+            this.cells.push(
+              new Cell(
+                this,
+                randomBetween(60, WIDTH - 60),
+                randomBetween(60, HEIGHT - 60),
+                chromosome.fork()
+              )
+            );
+          }
+
+          for (let i = 0; i < 60; i++) {
+            this.food.push(new Food(this));
+          }
+        }
+
+        findClosestFood(cell) {
+          let closest = null;
+          let minDistance = Infinity;
+          for (const food of this.food) {
+            if (food.dead) continue;
+            const d = distance(cell.x, cell.y, food.x, food.y);
+            if (d < minDistance) {
+              minDistance = d;
+              closest = food;
+            }
+          }
+          return closest;
+        }
+
+        resolveInteractions() {
+          for (const cell of this.cells) {
+            if (cell.dead) continue;
+            for (const food of this.food) {
+              if (food.dead) continue;
+              if (distance(cell.x, cell.y, food.x, food.y) < cell.size + food.radius) {
+                cell.eat(food);
+              }
+            }
+          }
+
+          for (let i = 0; i < this.cells.length; i++) {
+            const a = this.cells[i];
+            if (a.dead) continue;
+            for (let j = i + 1; j < this.cells.length; j++) {
+              const b = this.cells[j];
+              if (b.dead) continue;
+              if (distance(a.x, a.y, b.x, b.y) < a.size + b.size) {
+                if (a.size / b.size >= 2) {
+                  a.eatCell(b);
+                } else if (b.size / a.size >= 2) {
+                  b.eatCell(a);
+                }
+              }
+            }
+          }
+        }
+
+        updateStats() {
+          const stats = document.getElementById("stats");
+          const avgImpulse =
+            this.cells.reduce((acc, cell) => acc + cell.impulse, 0) /
+              (this.cells.length || 1);
+          const avgSize =
+            this.cells.reduce((acc, cell) => acc + cell.size, 0) /
+              (this.cells.length || 1);
+          stats.textContent = `Клеток: ${this.cells.length} · Еда: ${
+            this.food.filter(f => !f.dead).length
+          } · Средний импульс: ${avgImpulse.toFixed(1)} · Средний размер: ${avgSize.toFixed(1)}`;
+        }
+
+        cleanup() {
+          this.cells = this.cells.filter(cell => !cell.dead);
+          this.food = this.food.filter(food => !food.dead);
+          if (this.pendingCells.length) {
+            this.cells.push(...this.pendingCells);
+            this.pendingCells.length = 0;
+          }
+        }
+
+        step(dt) {
+          for (const cell of this.cells) {
+            cell.update(dt);
+          }
+          this.resolveInteractions();
+          this.cleanup();
+        }
+
+        draw() {
+          this.ctx.clearRect(0, 0, WIDTH, HEIGHT);
+          for (const food of this.food) {
+            if (!food.dead) food.draw(this.ctx);
+          }
+          for (const cell of this.cells) {
+            if (!cell.dead) cell.draw(this.ctx);
+          }
+        }
+
+        loop = () => {
+          if (!this.running) return;
+          const now = performance.now();
+          const dt = Math.min((now - this.lastTime) / 1000, 0.1);
+          this.lastTime = now;
+          this.step(dt);
+          this.draw();
+          this.updateStats();
+          requestAnimationFrame(this.loop);
+        };
+
+        start() {
+          if (this.running) return;
+          this.running = true;
+          this.lastTime = performance.now();
+          requestAnimationFrame(this.loop);
+        }
+      }
+
+      const simulation = new Simulation(document.getElementById("world"));
+      simulation.start();
+    </script>
   </body>
 </html>
