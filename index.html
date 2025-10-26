@@ -1,12 +1,464 @@
-<html>
+<!DOCTYPE html>
+<html lang="ru">
   <head>
-    <title>Lively dots</title>
     <meta charset="UTF-8" />
-  </head>
+    <title>Lively Dots — автономная эволюция</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+        background: radial-gradient(circle at top, #1a2733 0%, #050608 60%);
+        color: #f4f6f8;
+      }
 
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1.5rem;
+        padding: 2rem 1rem 3rem;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.8rem, 2vw + 1rem, 2.6rem);
+        text-align: center;
+      }
+
+      .board {
+        background: #0b1015;
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+        padding: 1.5rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+      }
+
+      canvas {
+        border-radius: 12px;
+        background: #0c1824;
+        width: min(600px, 80vw);
+        height: auto;
+      }
+
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 1.5rem;
+        font-size: 0.95rem;
+        letter-spacing: 0.02em;
+      }
+
+      .stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .stat span:first-child {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        opacity: 0.6;
+        letter-spacing: 0.08em;
+      }
+
+      .description {
+        max-width: 760px;
+        line-height: 1.65;
+        background: rgba(9, 15, 22, 0.55);
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      a {
+        color: #5ad0ff;
+      }
+    </style>
+  </head>
   <body>
-    <div id="app"></div>
-    <script src="src/index.ts"></script>
-    <a href="//github.com/alpatovdanila/lively-dots">alpatovdanila/lively-dots</a>
+    <h1>Живые точки: эволюция без внешних библиотек</h1>
+    <div class="board">
+      <canvas id="world" width="600" height="600" aria-label="Песочница с клетками и пищей"></canvas>
+      <div class="stats">
+        <div class="stat">
+          <span>Клеток</span>
+          <strong id="stat-cells">0</strong>
+        </div>
+        <div class="stat">
+          <span>Пищи</span>
+          <strong id="stat-food">0</strong>
+        </div>
+        <div class="stat">
+          <span>Макс. поколение</span>
+          <strong id="stat-generation">1</strong>
+        </div>
+        <div class="stat">
+          <span>Средний импульс</span>
+          <strong id="stat-impulse">0</strong>
+        </div>
+        <div class="stat">
+          <span>Средний размер</span>
+          <strong id="stat-size">0</strong>
+        </div>
+      </div>
+    </div>
+    <article class="description">
+      <h2>Как работает модель</h2>
+      <p>
+        Клетки управляются набором генов (&laquo;хромосомой&raquo;), в котором два параметра:
+        сила импульса для движения и радиус тела. Каждый такт симуляции клетка тратит энергию на
+        перемещение к ближайшему источнику пищи и восстанавливает запасы, когда поедает её.
+      </p>
+      <p>
+        Резерв энергии ограничен. Когда клетка насыщена, она с некоторой вероятностью делится:
+        создаёт двух потомков, которые наследуют хромосому с шансом мутации. Если энергии не
+        хватает на поддержание жизни, клетка погибает. Более крупные особи могут поглощать
+        меньших (если радиус больше вдвое), что повышает их энергию и ускоряет отбор.
+      </p>
+      <p>
+        Таким образом, система ищет баланс между затратами на перемещение и устойчивостью к
+        столкновениям, а случайные мутации позволяют исследовать пространство решений. Это
+        разновидность адаптивного поиска, схожая с задачами оптимизации выживаемости: особи,
+        чьи параметры лучше приспособлены к среде (достаточно быстрые, но не слишком энергоёмкие),
+        получают преимущество и доминируют в популяции.
+      </p>
+    </article>
+    <script>
+      const WIDTH = 600;
+      const HEIGHT = 600;
+      const BASE_FOOD_COUNT = 50;
+      const BASE_CELL_COUNT = 100;
+      const FOOD_RESPAWN_MIN = 1000;
+      const FOOD_RESPAWN_MAX = 2000;
+
+      const canvas = document.getElementById("world");
+      const ctx = canvas.getContext("2d");
+
+      const statCells = document.getElementById("stat-cells");
+      const statFood = document.getElementById("stat-food");
+      const statGeneration = document.getElementById("stat-generation");
+      const statImpulse = document.getElementById("stat-impulse");
+      const statSize = document.getElementById("stat-size");
+
+      const randomBetween = (from, to) => Math.random() * (to - from) + from;
+      const randomIntBetween = (from, to) => Math.floor(randomBetween(from, to));
+      const distanceBetween = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
+
+      class Gene {
+        constructor({ name, value, range = null, mutationStep = null }) {
+          this.name = name;
+          this.value = value;
+          this.range = range;
+          this.mutationStep = mutationStep;
+        }
+
+        mutate() {
+          let newValue = this.value;
+          if (this.range && this.mutationStep) {
+            const [min, max] = this.range;
+            const sign = Math.random() < 0.5 ? -1 : 1;
+            newValue = this.value + this.mutationStep * sign;
+            if (newValue > max) newValue = max;
+            if (newValue < min) newValue = min;
+          }
+          return new Gene({
+            name: this.name,
+            value: newValue,
+            range: this.range,
+            mutationStep: this.mutationStep
+          });
+        }
+
+        fork() {
+          return new Gene({
+            name: this.name,
+            value: this.value,
+            range: this.range,
+            mutationStep: this.mutationStep
+          });
+        }
+      }
+
+      class Chromosome {
+        constructor(genes, prev = null) {
+          this.genes = genes;
+          this.prev = prev;
+        }
+
+        fork() {
+          const copied = this.genes.map(gene => gene.fork());
+          return new Chromosome(copied, this);
+        }
+
+        mutate() {
+          const copied = this.genes.map(gene => gene.fork());
+          const targetIndex = randomIntBetween(0, copied.length);
+          copied[targetIndex] = copied[targetIndex].mutate();
+          return new Chromosome(copied, this);
+        }
+
+        get(name) {
+          return this.genes.find(gene => gene.name === name);
+        }
+
+        get generation() {
+          return this.prev ? this.prev.generation + 1 : 1;
+        }
+
+        static create(definitions) {
+          return new Chromosome(definitions.map(def => new Gene(def)));
+        }
+      }
+
+      class Food {
+        constructor() {
+          this.radius = 3;
+          this.x = randomBetween(50, WIDTH - 50);
+          this.y = randomBetween(50, HEIGHT - 50);
+          this.active = true;
+        }
+
+        consume() {
+          if (!this.active) return;
+          this.active = false;
+          setTimeout(() => spawnFood(), randomIntBetween(FOOD_RESPAWN_MIN, FOOD_RESPAWN_MAX));
+        }
+
+        draw(context) {
+          if (!this.active) return;
+          context.beginPath();
+          context.fillStyle = "#4bcffa";
+          context.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+          context.fill();
+        }
+      }
+
+      class Cell {
+        constructor(x, y, chromosome) {
+          this.x = x;
+          this.y = y;
+          this.vx = 0;
+          this.vy = 0;
+          this.chromosome = chromosome;
+          this.size = chromosome.get("size").value;
+          this.impulse = chromosome.get("impulse").value;
+          this.maxEnergy = 200;
+          this.energy = 200;
+          this.alive = true;
+        }
+
+        getReproductionChance() {
+          return 0.25 * (this.energy / this.maxEnergy);
+        }
+
+        steerTowards(food) {
+          const dx = food.x - this.x;
+          const dy = food.y - this.y;
+          const distance = Math.hypot(dx, dy) || 1;
+          const strength = (this.impulse / 1200) * (this.energy / this.maxEnergy);
+          this.vx += (dx / distance) * strength;
+          this.vy += (dy / distance) * strength;
+        }
+
+        clampToWorld() {
+          if (this.x - this.size < 0) {
+            this.x = this.size;
+            this.vx = Math.abs(this.vx);
+          }
+          if (this.x + this.size > WIDTH) {
+            this.x = WIDTH - this.size;
+            this.vx = -Math.abs(this.vx);
+          }
+          if (this.y - this.size < 0) {
+            this.y = this.size;
+            this.vy = Math.abs(this.vy);
+          }
+          if (this.y + this.size > HEIGHT) {
+            this.y = HEIGHT - this.size;
+            this.vy = -Math.abs(this.vy);
+          }
+        }
+
+        update(dt, foods) {
+          if (!this.alive) return [];
+
+          let closest = null;
+          let closestDistance = Infinity;
+          for (const food of foods) {
+            if (!food.active) continue;
+            const distance = distanceBetween(this.x, this.y, food.x, food.y);
+            if (distance < closestDistance) {
+              closest = food;
+              closestDistance = distance;
+            }
+          }
+
+          if (closest) {
+            this.steerTowards(closest);
+          }
+
+          this.vx *= 0.97;
+          this.vy *= 0.97;
+          this.x += this.vx * dt;
+          this.y += this.vy * dt;
+          this.clampToWorld();
+
+          if (closest && closest.active) {
+            const distance = distanceBetween(this.x, this.y, closest.x, closest.y);
+            if (distance <= this.size + closest.radius) {
+              closest.consume();
+              this.energy = Math.min(this.maxEnergy, this.energy + 50);
+            }
+          }
+
+          this.energy -= (this.impulse * 0.05 + this.size * 0.02) * dt;
+          if (this.energy > this.maxEnergy) this.energy = this.maxEnergy;
+
+          const offspring = [];
+          if (Math.random() < (this.getReproductionChance() * dt) / 60) {
+            for (let i = 0; i < 2; i += 1) {
+              const genome = Math.random() < 0.25 ? this.chromosome.mutate() : this.chromosome.fork();
+              offspring.push(new Cell(this.x + randomBetween(-5, 5), this.y + randomBetween(-5, 5), genome));
+            }
+            this.alive = false;
+          }
+
+          if (this.energy <= 0) {
+            this.alive = false;
+          }
+
+          return offspring;
+        }
+
+        draw(context) {
+          if (!this.alive) return;
+          const energyRatio = Math.max(this.energy / this.maxEnergy, 0);
+          const hue = 180 * energyRatio;
+          context.beginPath();
+          context.fillStyle = `hsl(${hue}, 80%, ${40 + energyRatio * 30}%)`;
+          context.globalAlpha = 0.65 + energyRatio * 0.35;
+          context.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+          context.fill();
+          context.globalAlpha = 1;
+        }
+      }
+
+      const foods = [];
+      const cells = [];
+
+      const baseChromosome = Chromosome.create([
+        { name: "impulse", value: 50, range: [10, 110], mutationStep: 5 },
+        { name: "size", value: 4, range: [2, 24], mutationStep: 2 }
+      ]);
+
+      function spawnFood() {
+        const food = new Food();
+        foods.push(food);
+      }
+
+      function spawnCell(x, y, chromosome = baseChromosome) {
+        cells.push(new Cell(x, y, chromosome));
+      }
+
+      function initializeWorld() {
+        for (let i = 0; i < BASE_FOOD_COUNT; i += 1) {
+          spawnFood();
+        }
+        for (let i = 0; i < BASE_CELL_COUNT; i += 1) {
+          spawnCell(randomBetween(50, WIDTH - 50), randomBetween(50, HEIGHT - 50));
+        }
+      }
+
+      function resolvePredation() {
+        for (let i = 0; i < cells.length; i += 1) {
+          const predator = cells[i];
+          if (!predator.alive) continue;
+          for (let j = i + 1; j < cells.length; j += 1) {
+            const prey = cells[j];
+            if (!prey.alive) continue;
+            const distance = distanceBetween(predator.x, predator.y, prey.x, prey.y);
+            if (distance > predator.size + prey.size) continue;
+            if (predator.size / prey.size >= 2) {
+              prey.alive = false;
+              predator.energy = Math.min(predator.maxEnergy, predator.energy + prey.energy);
+            } else if (prey.size / predator.size >= 2) {
+              predator.alive = false;
+              prey.energy = Math.min(prey.maxEnergy, prey.energy + predator.energy);
+              break;
+            }
+          }
+        }
+      }
+
+      function cleanupEntities(newCells) {
+        for (let i = foods.length - 1; i >= 0; i -= 1) {
+          if (!foods[i].active) {
+            foods.splice(i, 1);
+          }
+        }
+        for (let i = cells.length - 1; i >= 0; i -= 1) {
+          if (!cells[i].alive) {
+            cells.splice(i, 1);
+          }
+        }
+        cells.push(...newCells);
+      }
+
+      function drawScene() {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = "rgba(9, 18, 26, 0.6)";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        foods.forEach(food => food.draw(ctx));
+        cells.forEach(cell => cell.draw(ctx));
+      }
+
+      function updateStats() {
+        statCells.textContent = cells.length.toString();
+        statFood.textContent = foods.filter(food => food.active).length.toString();
+        const maxGeneration = cells.reduce((max, cell) => Math.max(max, cell.chromosome.generation), 1);
+        statGeneration.textContent = maxGeneration.toString();
+        const avgImpulse =
+          cells.reduce((sum, cell) => sum + cell.chromosome.get("impulse").value, 0) /
+          (cells.length || 1);
+        const avgSize =
+          cells.reduce((sum, cell) => sum + cell.chromosome.get("size").value, 0) /
+          (cells.length || 1);
+        statImpulse.textContent = avgImpulse.toFixed(1);
+        statSize.textContent = avgSize.toFixed(1);
+      }
+
+      let lastTime = performance.now();
+
+      function frame(now) {
+        const dt = Math.max((now - lastTime) / 16.666, 0.5);
+        lastTime = now;
+
+        const offspring = [];
+        cells.forEach(cell => {
+          const children = cell.update(dt, foods);
+          if (children.length) offspring.push(...children);
+        });
+
+        resolvePredation();
+        cleanupEntities(offspring);
+        updateStats();
+        drawScene();
+
+        requestAnimationFrame(frame);
+      }
+
+      initializeWorld();
+      updateStats();
+      drawScene();
+      requestAnimationFrame(frame);
+    </script>
   </body>
 </html>
